@@ -23,7 +23,7 @@ class CachedMNIST(Dataset):
         img_transform = transforms.Compose([transforms.Lambda(self._transformation)])
         self.ds = MNIST("./data", download=True, train=train, transform=img_transform)
         self.cuda = cuda
-        self.testing_mode = testing_mode
+        self.testing_mode = testing_modea
         self._cache = dict()
 
     @staticmethod
