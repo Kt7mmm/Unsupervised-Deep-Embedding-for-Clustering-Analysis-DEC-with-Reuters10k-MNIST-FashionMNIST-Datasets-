@@ -9,21 +9,19 @@ from torch.utils.data import Dataset
 from tensorboardX import SummaryWriter
 import uuid
 import os
+import scipy.io as sio
 
 from ptdec.dec import DEC
 from ptdec.model import train, predict
 from ptsdae.sdae import StackedDenoisingAutoEncoder
 import ptsdae.model as ae
 from ptdec.utils import cluster_accuracy
-import scipy.io as sio
 
 
 class ReutersDataset(Dataset):
-    def __init__(self, mat_file, cuda, transform=None):
-        self.data = sio.loadmat(mat_file)
-        self.features = self.data['X']
-        self.labels = self.data['Y'].squeeze()
-        self.transform = transform
+    def __init__(self, features, labels, cuda):
+        self.features = features
+        self.labels = labels.squeeze()
         self.cuda = cuda
 
     def __len__(self):
@@ -32,8 +30,6 @@ class ReutersDataset(Dataset):
     def __getitem__(self, idx):
         feature = self.features[idx]
         label = self.labels[idx]
-        if self.transform:
-            feature = self.transform(feature)
         feature = torch.tensor(feature, dtype=torch.float)
         label = torch.tensor(label, dtype=torch.long)
         if self.cuda:
@@ -83,8 +79,12 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_f
             epoch,
         )
 
-    ds_train = ReutersDataset(mat_file=mat_file, cuda=cuda)  # training dataset
-    ds_val = ReutersDataset(mat_file=mat_file, cuda=cuda)  # evaluation dataset
+    mat_contents = sio.loadmat(mat_file)
+    features = mat_contents['X']
+    labels = mat_contents['Y']
+
+    ds_train = ReutersDataset(features=features, labels=labels, cuda=cuda)  # training dataset
+    ds_val = ReutersDataset(features=features, labels=labels, cuda=cuda)  # evaluation dataset
     autoencoder = StackedDenoisingAutoEncoder(
         [2000, 500, 500, 2000, 10], final_activation=None
     )

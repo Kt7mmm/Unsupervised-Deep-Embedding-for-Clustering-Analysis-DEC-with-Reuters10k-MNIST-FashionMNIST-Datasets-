@@ -10,7 +10,6 @@ from tensorboardX import SummaryWriter
 import uuid
 import os
 from datasets import load_dataset
-from sklearn.feature_extraction.text import TfidfVectorizer
 
 from ptdec.dec import DEC
 from ptdec.model import train, predict
@@ -18,23 +17,20 @@ from ptsdae.sdae import StackedDenoisingAutoEncoder
 import ptsdae.model as ae
 from ptdec.utils import cluster_accuracy
 
+
 class ReutersDataset(Dataset):
-    def __init__(self, dataset, tfidf_features, cuda):
-        self.data = dataset
-        self.tfidf_features = tfidf_features
-        self.cuda = cuda
+    def __init__(self, dataset, transform=None):
+        self.dataset = dataset
+        self.transform = transform
 
     def __len__(self):
-        return len(self.data)
+        return len(self.dataset)
 
     def __getitem__(self, idx):
-        feature = self.tfidf_features[idx]
-        label = self.data[idx]["topics"]
-        feature = torch.tensor(feature, dtype=torch.float)
-        label = torch.tensor(label, dtype=torch.long)
-        if self.cuda:
-            feature = feature.cuda()
-            label = label.cuda()
+        feature = self.dataset[idx]["text"]
+        label = self.dataset[idx]["label"]
+        if self.transform:
+            feature = self.transform(feature)
         return feature, label
 
 
@@ -73,16 +69,10 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
             epoch,
         )
 
-    # Load the Reuters-21578 dataset
-    dataset = load_dataset('reuters21578', 'ModApte')
+    dataset = load_dataset("reuters21578")
 
-    # Preprocessing
-    texts = [doc["text"] for doc in dataset["train"]]
-    vectorizer = TfidfVectorizer(max_features=2000)
-    tfidf_features = vectorizer.fit_transform(texts).toarray()
-
-    ds_train = ReutersDataset(dataset["train"], tfidf_features, cuda=cuda)  # training dataset
-    ds_val = ReutersDataset(dataset["test"], tfidf_features, cuda=cuda)  # evaluation dataset
+    ds_train = ReutersDataset(dataset["train"])  # training dataset
+    ds_val = ReutersDataset(dataset["test"])  # evaluation dataset
     autoencoder = StackedDenoisingAutoEncoder(
         [2000, 500, 500, 2000, 10], final_activation=None
     )
@@ -138,4 +128,27 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
     torch.save(model.state_dict(), "dec_model.pth")
 
     predicted, actual = predict(
-        ds_train, model, 1024, silent=True
+        ds_train, model, 1024, silent=True, return_actual=True, cuda=cuda
+    )
+    actual = actual.cpu().numpy()
+    predicted = predicted.cpu().numpy()
+    reassignment, accuracy = cluster_accuracy(actual, predicted)
+    print("Final DEC accuracy: %s" % accuracy)
+    if not testing_mode:
+        predicted_reassigned = [
+            reassignment[item] for item in predicted
+        ]  # TODO numpify
+        confusion = confusion_matrix(actual, predicted_reassigned)
+        normalised_confusion = (
+            confusion.astype("float") / confusion.sum(axis=1)[:, np.newaxis]
+        )
+        confusion_id = uuid.uuid4().hex
+        sns.heatmap(normalised_confusion).get_figure().savefig(
+            "confusion_%s.png" % confusion_id
+        )
+        print("Writing out confusion diagram with UUID: %s" % confusion_id)
+        writer.close()
+
+
+if __name__ == "__main__":
+    main()
