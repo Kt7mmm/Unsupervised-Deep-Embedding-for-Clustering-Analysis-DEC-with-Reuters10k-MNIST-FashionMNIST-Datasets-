@@ -1,14 +1,10 @@
 import numpy as np
-import seaborn as sns
-from sklearn.metrics import confusion_matrix
 import torch
-from torch.utils.data import Dataset
 import scipy.io as sio
+from torch.utils.data import Dataset
 from ptdec.dec import DEC
 from ptdec.model import predict
 from ptsdae.sdae import StackedDenoisingAutoEncoder
-from ptdec.utils import cluster_accuracy
-import uuid
 import click
 
 class ReutersDataset(Dataset):
@@ -45,38 +41,6 @@ def load_models(cuda):
     
     return autoencoder, model
 
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix
-import uuid
-
-def generate_confusion_matrix(actual, predicted_reassigned):
-    confusion = confusion_matrix(actual, predicted_reassigned)
-    
-    # Avoid division by zero by using safe division and handling empty rows
-    with np.errstate(all='ignore'):
-        normalised_confusion = np.divide(
-            confusion, confusion.sum(axis=1, keepdims=True)
-        )
-        normalised_confusion[~np.isfinite(normalised_confusion)] = 0  # replace inf, -inf, NaN with 0
-    
-    # Plotting
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(normalised_confusion, annot=True, cmap='magma', fmt='.2f', cbar=True)
-    plt.title('Normalized Confusion Matrix')
-    plt.xlabel('Predicted')
-    plt.ylabel('Actual')
-    plt.xticks(np.arange(10), [f'Class {i}' for i in range(10)], rotation=45)
-    plt.yticks(np.arange(10), [f'Class {i}' for i in range(10)], rotation=45)
-    
-    # Save the figure
-    confusion_id = uuid.uuid4().hex
-    plt.savefig("confusion_%s.png" % confusion_id)
-    plt.show()
-
-    print("Writing out confusion diagram with UUID: %s" % confusion_id)
-    
 @click.command()
 @click.option(
     "--cuda", 
@@ -90,13 +54,7 @@ def generate_confusion_matrix(actual, predicted_reassigned):
     type=str,
     default="examples/reuters_10k/reuters10k.mat"
 )
-@click.option(
-    "--target-cluster",
-    help="The target cluster to get top scoring elements from (default 0).",
-    type=int,
-    default=0
-)
-def main(cuda, mat_file, target_cluster):
+def main(cuda, mat_file):
     mat_contents = sio.loadmat(mat_file)
     features = mat_contents['X']
     labels = mat_contents['Y']
@@ -111,8 +69,6 @@ def main(cuda, mat_file, target_cluster):
     )
     actual = actual.cpu().numpy()
     predicted = predicted.cpu().numpy()
-    reassignment, accuracy = cluster_accuracy(actual, predicted)
-    print("Final DEC accuracy: %s" % accuracy)
 
     # Get the soft assignments
     model.eval()
@@ -134,15 +90,13 @@ def main(cuda, mat_file, target_cluster):
         # Store the top indices in the matrix
         top_elements_matrix[cluster] = top_indices
 
-    # Print the matrix
+    # Print the top scoring elements with their data
     print("Top 10 scoring elements in each cluster:")
-    print(top_elements_matrix)
-
-    # Generate the confusion matrix plot
-    predicted_reassigned = [
-        reassignment[item] for item in predicted
-    ]  # TODO numpify
-    generate_confusion_matrix(actual, predicted_reassigned)
+    for cluster in range(10):
+        print(f"\nCluster {cluster}:")
+        for idx in top_elements_matrix[cluster]:
+            document_content = features[idx]  # Assuming features are document vectors
+            print(f"Index {idx}: {document_content[:100]}")  # Print the first 100 characters
 
 if __name__ == "__main__":
     main()
