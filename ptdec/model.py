@@ -219,3 +219,42 @@ def predict(
         return torch.cat(features).max(1)[1], torch.cat(actual).long()
     else:
         return torch.cat(features).max(1)[1]
+
+
+
+def train2(data, model, optimizer, scheduler, corruption, validation, cuda, epochs, batch_size, update_callback=None):
+    data_iterator = torch.utils.data.DataLoader(data, batch_size=batch_size, shuffle=True)
+    validation_iterator = torch.utils.data.DataLoader(validation, batch_size=batch_size)
+    
+    for epoch in range(epochs):
+        model.train()
+        for index, (features, labels) in enumerate(tqdm(data_iterator)):
+            if cuda:
+                features = features.cuda(non_blocking=True)
+                labels = labels.cuda(non_blocking=True)
+            corrupted_features = corrupt(features, corruption)
+            optimizer.zero_grad()
+            outputs = model(corrupted_features)
+            loss = model.loss(outputs, features)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            
+            # Additional code for logging, validation, etc.
+            
+            if update_callback is not None:
+                validation_loss = evaluate(model, validation_iterator, cuda)
+                update_callback(epoch, optimizer.param_groups[0]['lr'], loss.item(), validation_loss)
+
+def evaluate2(model, data_iterator, cuda):
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for features, labels in data_iterator:
+            if cuda:
+                features = features.cuda(non_blocking=True)
+                labels = labels.cuda(non_blocking=True)
+            outputs = model(features)
+            loss = model.loss(outputs, features)
+            total_loss += loss.item()
+    return total_loss / len(data_iterator)

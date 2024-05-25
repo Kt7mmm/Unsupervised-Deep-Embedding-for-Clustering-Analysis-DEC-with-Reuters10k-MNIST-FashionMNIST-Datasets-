@@ -17,22 +17,24 @@ from ptsdae.sdae import StackedDenoisingAutoEncoder
 import ptsdae.model as ae
 from ptdec.utils import cluster_accuracy
 
-
 class ReutersDataset(Dataset):
-    def __init__(self, dataset, transform=None):
-        self.dataset = dataset
-        self.transform = transform
+    def __init__(self, features, labels, cuda):
+        self.features = features
+        self.labels = labels
+        self.cuda = cuda
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.labels)
 
     def __getitem__(self, idx):
-        feature = self.dataset[idx]["text"]
-        label = self.dataset[idx]["label"]
-        if self.transform:
-            feature = self.transform(feature)
+        feature = self.features[idx]
+        label = self.labels[idx]
+        feature = torch.tensor(feature, dtype=torch.float)
+        label = torch.tensor(label, dtype=torch.long)
+        if self.cuda:
+            feature = feature.cuda()
+            label = label.cuda()
         return feature, label
-
 
 @click.command()
 @click.option(
@@ -59,7 +61,13 @@ class ReutersDataset(Dataset):
     type=bool,
     default=False,
 )
-def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
+@click.option(
+    "--target-cluster",
+    help="the target cluster to get top scoring elements from (default 0).",
+    type=int,
+    default=0
+)
+def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, target_cluster):
     writer = SummaryWriter()  # create the TensorBoard object
 
     def training_callback(epoch, lr, loss, validation_loss):
@@ -69,15 +77,32 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
             epoch,
         )
 
-    dataset = load_dataset("reuters21578")
-
-    ds_train = ReutersDataset(dataset["train"])  # training dataset
-    ds_val = ReutersDataset(dataset["test"])  # evaluation dataset
+    # Load the Reuters dataset
+    dataset = load_dataset('reuters21578', 'ModHayes')
+    texts = [item['text'] for item in dataset['train']] + [item['text'] for item in dataset['test']]
+    labels = [item['label'] for item in dataset['train']] + [item['label'] for item in dataset['test']]
+    
+    # Convert texts to numerical features
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    vectorizer = TfidfVectorizer(max_features=2000)
+    features = vectorizer.fit_transform(texts).toarray()
+    
+    # Split the features back into train and test sets
+    train_size = len(dataset['train'])
+    features_train = features[:train_size]
+    labels_train = labels[:train_size]
+    features_test = features[train_size:]
+    labels_test = labels[train_size:]
+    
+    ds_train = ReutersDataset(features=features_train, labels=labels_train, cuda=cuda)
+    ds_val = ReutersDataset(features=features_test, labels=labels_test, cuda=cuda)
+    
     autoencoder = StackedDenoisingAutoEncoder(
         [2000, 500, 500, 2000, 10], final_activation=None
     )
     if cuda:
         autoencoder.cuda()
+    
     print("Pretraining stage.")
     ae.pretrain(
         ds_train,
@@ -134,6 +159,23 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
     predicted = predicted.cpu().numpy()
     reassignment, accuracy = cluster_accuracy(actual, predicted)
     print("Final DEC accuracy: %s" % accuracy)
+
+    # Get the soft assignments
+    model.eval()
+    with torch.no_grad():
+        q = model(ds_train.features)
+        if cuda:
+            q = q.cpu()
+        q = q.numpy()
+
+    # Get top 10 scoring elements from the target cluster
+    top_indices = np.argsort(q[:, target_cluster])[-10:]
+    top_scores = q[top_indices, target_cluster]
+
+    print(f"Top 10 scoring elements in cluster {target_cluster}:")
+    for idx, score in zip(top_indices, top_scores):
+        print(f"Index: {idx}, Score: {score}")
+
     if not testing_mode:
         predicted_reassigned = [
             reassignment[item] for item in predicted
@@ -148,7 +190,6 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
         )
         print("Writing out confusion diagram with UUID: %s" % confusion_id)
         writer.close()
-
 
 if __name__ == "__main__":
     main()
