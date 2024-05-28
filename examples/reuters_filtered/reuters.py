@@ -9,10 +9,10 @@ from torch.utils.data import Dataset
 from tensorboardX import SummaryWriter
 import uuid
 import os
-from datasets import load_dataset
+import pickle
 
 from ptdec.dec import DEC
-from ptdec.model import train, predict
+from ptdec.model import train, predict, target_distribution
 from ptsdae.sdae import StackedDenoisingAutoEncoder
 import ptsdae.model as ae
 from ptdec.utils import cluster_accuracy
@@ -20,7 +20,7 @@ from ptdec.utils import cluster_accuracy
 class ReutersDataset(Dataset):
     def __init__(self, features, labels, cuda):
         self.features = features
-        self.labels = labels
+        self.labels = labels.squeeze()
         self.cuda = cuda
 
     def __len__(self):
@@ -62,12 +62,18 @@ class ReutersDataset(Dataset):
     default=False,
 )
 @click.option(
+    "--pkl-file",
+    help="path to the filtered_reuters_dataset.pkl file.",
+    type=str,
+    default="filtered_reuters_dataset.pkl"
+)
+@click.option(
     "--target-cluster",
     help="the target cluster to get top scoring elements from (default 0).",
     type=int,
     default=0
 )
-def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, target_cluster):
+def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, pkl_file, target_cluster):
     writer = SummaryWriter()  # create the TensorBoard object
 
     def training_callback(epoch, lr, loss, validation_loss):
@@ -77,32 +83,17 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, targe
             epoch,
         )
 
-    # Load the Reuters dataset
-    dataset = load_dataset('reuters21578', 'ModHayes')
-    texts = [item['text'] for item in dataset['train']] + [item['text'] for item in dataset['test']]
-    labels = [item['label'] for item in dataset['train']] + [item['label'] for item in dataset['test']]
-    
-    # Convert texts to numerical features
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    vectorizer = TfidfVectorizer(max_features=2000)
-    features = vectorizer.fit_transform(texts).toarray()
-    
-    # Split the features back into train and test sets
-    train_size = len(dataset['train'])
-    features_train = features[:train_size]
-    labels_train = labels[:train_size]
-    features_test = features[train_size:]
-    labels_test = labels[train_size:]
-    
-    ds_train = ReutersDataset(features=features_train, labels=labels_train, cuda=cuda)
-    ds_val = ReutersDataset(features=features_test, labels=labels_test, cuda=cuda)
-    
+    # Load the filtered dataset from the pickle file
+    with open(pkl_file, 'rb') as f:
+        features, labels = pickle.load(f)
+
+    ds_train = ReutersDataset(features=features, labels=labels, cuda=cuda)  # training dataset
+    ds_val = ReutersDataset(features=features, labels=labels, cuda=cuda)  # evaluation dataset
     autoencoder = StackedDenoisingAutoEncoder(
-        [2000, 500, 500, 2000, 10], final_activation=None
+        [features.shape[1], 500, 500, 2000, 10], final_activation=None
     )
     if cuda:
         autoencoder.cuda()
-    
     print("Pretraining stage.")
     ae.pretrain(
         ds_train,
@@ -179,7 +170,7 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, targe
     if not testing_mode:
         predicted_reassigned = [
             reassignment[item] for item in predicted
-        ]  # TODO numpify
+        ]
         confusion = confusion_matrix(actual, predicted_reassigned)
         normalised_confusion = (
             confusion.astype("float") / confusion.sum(axis=1)[:, np.newaxis]

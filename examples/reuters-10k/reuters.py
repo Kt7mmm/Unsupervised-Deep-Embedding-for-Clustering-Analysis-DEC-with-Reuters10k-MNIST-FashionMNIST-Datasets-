@@ -12,7 +12,7 @@ import os
 import scipy.io as sio
 
 from ptdec.dec import DEC
-from ptdec.model import train, predict
+from ptdec.model import train, predict, target_distribution
 from ptsdae.sdae import StackedDenoisingAutoEncoder
 import ptsdae.model as ae
 from ptdec.utils import cluster_accuracy
@@ -69,7 +69,13 @@ class ReutersDataset(Dataset):
     type=str,
     default="examples/reuters_10k/reuters10k.mat"
 )
-def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_file):
+@click.option(
+    "--target-cluster",
+    help="the target cluster to get top scoring elements from (default 0).",
+    type=int,
+    default=0
+)
+def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_file, target_cluster):
     writer = SummaryWriter()  # create the TensorBoard object
 
     def training_callback(epoch, lr, loss, validation_loss):
@@ -146,6 +152,23 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_f
     predicted = predicted.cpu().numpy()
     reassignment, accuracy = cluster_accuracy(actual, predicted)
     print("Final DEC accuracy: %s" % accuracy)
+
+    # Get the soft assignments
+    model.eval()
+    with torch.no_grad():
+        q = model(ds_train.features)
+        if cuda:
+            q = q.cpu()
+        q = q.numpy()
+
+    # Get top 10 scoring elements from the target cluster
+    top_indices = np.argsort(q[:, target_cluster])[-10:]
+    top_scores = q[top_indices, target_cluster]
+
+    print(f"Top 10 scoring elements in cluster {target_cluster}:")
+    for idx, score in zip(top_indices, top_scores):
+        print(f"Index: {idx}, Score: {score}")
+
     if not testing_mode:
         predicted_reassigned = [
             reassignment[item] for item in predicted
