@@ -146,14 +146,40 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
             reassignment[item] for item in predicted
         ]  # TODO numpify
         confusion = confusion_matrix(actual, predicted_reassigned)
-        normalised_confusion = (
-            confusion.astype("float") / confusion.sum(axis=1)[:, np.newaxis]
-        )
+        with np.errstate(all='ignore'):
+            normalised_confusion = np.divide(confusion, confusion.sum(axis=1, keepdims=True))
+            normalised_confusion[~np.isfinite(normalised_confusion)] = 0  # replace inf, -inf, NaN with 0
+    
+        # Plotting
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(normalised_confusion, annot=True, cmap='magma', fmt='.2f', cbar=True)
+        plt.title('Normalized Confusion Matrix')
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+        plt.xticks(np.arange(10), [f'Class {i}' for i in range(10)], rotation=45)
+        plt.yticks(np.arange(10), [f'Class {i}' for i in range(10)], rotation=45)
+        
+        # Save the figure
         confusion_id = uuid.uuid4().hex
-        sns.heatmap(normalised_confusion).get_figure().savefig(
-            "confusion_%s.png" % confusion_id
-        )
+        plt.savefig("confusion_%s.png" % confusion_id)
+        plt.show()
         print("Writing out confusion diagram with UUID: %s" % confusion_id)
+        plt.close()
+        plt.figure(figsize=(20, 20))
+        for cluster_id in range(10):
+            cluster_indices = np.where(predicted == cluster_id)[0]
+            if len(cluster_indices) > 10:
+                cluster_indices = cluster_indices[:10]
+            cluster_images = [ds_train[i][0].cpu().numpy().reshape(28, 28) for i in cluster_indices]
+            
+            for idx, image in enumerate(cluster_images):
+                plt.subplot(10, 10, cluster_id * 10 + idx + 1)
+                plt.imshow(image, cmap='gray')
+                plt.axis('off')
+        plt.suptitle('Clusters of Fashion MNIST', fontsize=16)
+        plt.savefig('clusters.png')
+        plt.close()
+
         writer.close()
 
 
