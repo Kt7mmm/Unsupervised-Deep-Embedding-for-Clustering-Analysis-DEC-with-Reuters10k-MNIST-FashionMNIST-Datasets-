@@ -16,6 +16,7 @@ from ptdec.model import train, predict, target_distribution
 from ptsdae.sdae import StackedDenoisingAutoEncoder
 import ptsdae.model as ae
 from ptdec.utils import cluster_accuracy
+from sklearn.model_selection import train_test_split
 
 
 class ReutersDataset(Dataset):
@@ -89,8 +90,12 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_f
     features = mat_contents['X']
     labels = mat_contents['Y']
 
-    ds_train = ReutersDataset(features=features, labels=labels, cuda=cuda)  # training dataset
-    ds_val = ReutersDataset(features=features, labels=labels, cuda=cuda)  # evaluation dataset
+    # Chia tập dữ liệu thành tập huấn luyện và tập kiểm tra
+    X_train, X_val, y_train, y_val = train_test_split(features, labels, test_size=0.2, random_state=42)
+
+    ds_train = ReutersDataset(features=X_train, labels=y_train, cuda=cuda)  # training dataset
+    ds_val = ReutersDataset(features=X_val, labels=y_val, cuda=cuda)  # validation dataset
+
     autoencoder = StackedDenoisingAutoEncoder(
         [2000, 500, 500, 2000, 10], final_activation=None
     )
@@ -146,7 +151,7 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_f
     torch.save(model.state_dict(), "dec_model.pth")
 
     predicted, actual = predict(
-        ds_train, model, 1024, silent=True, return_actual=True, cuda=cuda
+        ds_val, model, 1024, silent=True, return_actual=True, cuda=cuda  # Dùng tập validation để kiểm tra
     )
     actual = actual.cpu().numpy()
     predicted = predicted.cpu().numpy()
@@ -156,7 +161,7 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_f
     # Get the soft assignments
     model.eval()
     with torch.no_grad():
-        q = model(ds_train.features)
+        q = model(ds_val.features)
         if cuda:
             q = q.cpu()
         q = q.numpy()
