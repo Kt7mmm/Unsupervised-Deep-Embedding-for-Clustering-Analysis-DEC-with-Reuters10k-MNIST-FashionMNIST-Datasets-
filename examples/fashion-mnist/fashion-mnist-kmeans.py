@@ -2,28 +2,28 @@ import click
 import numpy as np
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
+from sklearn.cluster import KMeans
 from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
-from torchvision.datasets import MNIST
+from torchvision.datasets import FashionMNIST
 from tensorboardX import SummaryWriter
 import uuid
+import matplotlib.pyplot as plt
 
-from ptdec.dec import DEC
-from ptdec.model import train, predict
 from ptsdae.sdae import StackedDenoisingAutoEncoder
 import ptsdae.model as ae
 from ptdec.utils import cluster_accuracy
 
 
-class CachedMNIST(Dataset):
+class CachedFashionMNIST(Dataset):
     def __init__(self, train, cuda, testing_mode=False):
         img_transform = transforms.Compose([transforms.Lambda(self._transformation)])
-        self.ds = MNIST("./data", download=True, train=train, transform=img_transform)
+        self.ds = FashionMNIST("./data", download=True, train=train, transform=img_transform)
         self.cuda = cuda
-        self.testing_mode = testing_modea
+        self.testing_mode = testing_mode
         self._cache = dict()
 
     @staticmethod
@@ -49,7 +49,7 @@ class CachedMNIST(Dataset):
 
 @click.command()
 @click.option(
-    "--cuda", help="whether to use CUDA (default False).", type=bool, default=False
+    "--cuda", help="whether to use CUDA (default True).", type=bool, default=True
 )
 @click.option(
     "--batch-size", help="training batch size (default 256).", type=int, default=256
@@ -74,7 +74,6 @@ class CachedMNIST(Dataset):
 )
 def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
     writer = SummaryWriter()  # create the TensorBoard object
-    # callback function to call during training, uses writer from the scope
 
     def training_callback(epoch, lr, loss, validation_loss):
         writer.add_scalars(
@@ -83,10 +82,10 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
             epoch,
         )
 
-    ds_train = CachedMNIST(
+    ds_train = CachedFashionMNIST(
         train=True, cuda=cuda, testing_mode=testing_mode
     )  # training dataset
-    ds_val = CachedMNIST(
+    ds_val = CachedFashionMNIST(
         train=False, cuda=cuda, testing_mode=testing_mode
     )  # evaluation dataset
     autoencoder = StackedDenoisingAutoEncoder(
@@ -94,7 +93,16 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
     )
     if cuda:
         autoencoder.cuda()
+    
+    def weights_init(m):
+        if isinstance(m, torch.nn.Linear):
+            torch.nn.init.kaiming_normal_(m.weight)
+
+    autoencoder.apply(weights_init)
+
     print("Pretraining stage.")
+    optimizer = SGD(autoencoder.parameters(), lr=0.01, momentum=0.9)
+    scheduler = StepLR(optimizer, 100, gamma=0.1)
     ae.pretrain(
         ds_train,
         autoencoder,
@@ -102,12 +110,13 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
         validation=ds_val,
         epochs=pretrain_epochs,
         batch_size=batch_size,
-        optimizer=lambda model: SGD(model.parameters(), lr=0.1, momentum=0.9),
-        scheduler=lambda x: StepLR(x, 100, gamma=0.1),
+        optimizer=lambda model: optimizer,
+        scheduler=lambda x: scheduler,
         corruption=0.2,
     )
     print("Training stage.")
-    ae_optimizer = SGD(params=autoencoder.parameters(), lr=0.1, momentum=0.9)
+    ae_optimizer = SGD(params=autoencoder.parameters(), lr=0.01, momentum=0.9)
+    ae_scheduler = StepLR(ae_optimizer, 100, gamma=0.1)
     ae.train(
         ds_train,
         autoencoder,
@@ -116,55 +125,47 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
         epochs=finetune_epochs,
         batch_size=batch_size,
         optimizer=ae_optimizer,
-        scheduler=StepLR(ae_optimizer, 100, gamma=0.1),
+        scheduler=ae_scheduler,
         corruption=0.2,
         update_callback=training_callback,
     )
-    print("DEC stage.")
-    model = DEC(cluster_number=10, hidden_dimension=10, encoder=autoencoder.encoder)
-    if cuda:
-        model.cuda()
-    dec_optimizer = SGD(model.parameters(), lr=0.01, momentum=0.9)
-    train(
-        dataset=ds_train,
-        model=model,
-        epochs=100,
-        batch_size=256,
-        optimizer=dec_optimizer,
-        stopping_delta=0.000001,
-        cuda=cuda,
-    )
-    predicted, actual = predict(
-        ds_train, model, 1024, silent=True, return_actual=True, cuda=cuda
-    )
-    actual = actual.cpu().numpy()
-    predicted = predicted.cpu().numpy()
+
+    print("KMeans stage.")
+    # Lấy các đặc trưng từ bộ dữ liệu huấn luyện thông qua encoder của autoencoder
+    features = []
+    labels = []
+    for data in ds_train:
+        img, label = data
+        img = img.view(-1, 28 * 28).cuda() if cuda else img.view(-1, 28 * 28)
+        features.append(autoencoder.encoder(img).cpu().detach().numpy())
+        labels.append(label.cpu().numpy().reshape(1))  # Sửa đổi này
+
+    features = np.concatenate(features)
+    labels = np.concatenate(labels)
+
+    kmeans = KMeans(n_clusters=10, random_state=0).fit(features)
+    predicted = kmeans.labels_
+    actual = labels
+
     reassignment, accuracy = cluster_accuracy(actual, predicted)
-    print("Final DEC accuracy: %s" % accuracy)
+    print("Final KMeans accuracy: %s" % accuracy)
     if not testing_mode:
         predicted_reassigned = [
             reassignment[item] for item in predicted
-        ]  # TODO numpify
+        ]
         confusion = confusion_matrix(actual, predicted_reassigned)
-        with np.errstate(all='ignore'):
-            normalised_confusion = np.divide(confusion, confusion.sum(axis=1, keepdims=True))
-            normalised_confusion[~np.isfinite(normalised_confusion)] = 0  # replace inf, -inf, NaN with 0
-    
-        # Plotting
-        plt.figure(figsize=(12, 10))
-        sns.heatmap(normalised_confusion, annot=True, cmap='magma', fmt='.2f', cbar=True)
-        plt.title('Normalized Confusion Matrix')
-        plt.xlabel('Predicted')
-        plt.ylabel('Actual')
-        plt.xticks(np.arange(10), [f'Class {i}' for i in range(10)], rotation=45)
-        plt.yticks(np.arange(10), [f'Class {i}' for i in range(10)], rotation=45)
-        
-        # Save the figure
+        normalised_confusion = (
+            confusion.astype("float") / confusion.sum(axis=1)[:, np.newaxis]
+        )
         confusion_id = uuid.uuid4().hex
+        plt.figure(figsize=(10, 7))
+        sns.heatmap(normalised_confusion, annot=True, fmt=".2f")
+        plt.title("Confusion Matrix with Annotations")
         plt.savefig("confusion_%s.png" % confusion_id)
-        plt.show()
-        print("Writing out confusion diagram with UUID: %s" % confusion_id)
         plt.close()
+        print("Writing out confusion diagram with UUID: %s" % confusion_id)
+        
+        # In ra tất cả các cụm trong 1 hình ảnh duy nhất
         plt.figure(figsize=(20, 20))
         for cluster_id in range(10):
             cluster_indices = np.where(predicted == cluster_id)[0]
@@ -181,7 +182,6 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode):
         plt.close()
 
         writer.close()
-
 
 if __name__ == "__main__":
     main()
