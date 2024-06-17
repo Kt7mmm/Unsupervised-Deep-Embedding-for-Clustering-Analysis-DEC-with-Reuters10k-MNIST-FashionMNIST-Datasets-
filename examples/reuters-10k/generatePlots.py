@@ -56,7 +56,7 @@ def generate_confusion_matrix(actual, predicted_reassigned, class_range):
     # Plotting
     plt.figure(figsize=(12, 10))
     sns.heatmap(confusion_normalized, annot=True, cmap='magma', fmt='.2f', cbar=True)
-    plt.title('Normalized Confusion Matrix for REUTERS-10K')
+    plt.title('Normalized Confusion Matrix')
     plt.xlabel('Predicted')
     plt.ylabel('Actual')
     plt.xticks(np.arange(len(class_range)) + 0.5, [f'Class {i}' for i in class_range], rotation=45)

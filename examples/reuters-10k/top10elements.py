@@ -34,7 +34,7 @@ def load_models(cuda):
     if cuda:
         autoencoder.cuda()
 
-    model = DEC(cluster_number=10, hidden_dimension=10, encoder=autoencoder.encoder)
+    model = DEC(cluster_number=10, hidden_dimension=10, encoder=autoencoder.encoder)  # Adjusted for 10 clusters
     model.load_state_dict(torch.load("dec_model.pth"))
     if cuda:
         model.cuda()
@@ -78,25 +78,22 @@ def main(cuda, mat_file):
             q = q.cpu()
         q = q.numpy()
 
-    # Iterate over each cluster
     # Initialize an empty matrix to store the top elements
-    top_elements_matrix = np.zeros((10, 10), dtype=int)
+    top_elements_matrix = np.zeros((10, 10), dtype=int)  # Adjusted for 10 clusters
 
     # Iterate over each cluster
-    for cluster in range(10):
+    for cluster in range(10):  # Adjusted for 10 clusters
         # Get top 10 scoring elements from the current cluster
         top_indices = np.argsort(q[:, cluster])[-10:]
         
         # Store the top indices in the matrix
         top_elements_matrix[cluster] = top_indices
 
-    # Print the top scoring elements with their data
+    # Print the top scoring elements in a matrix format
     print("Top 10 scoring elements in each cluster:")
     for cluster in range(10):
-        print(f"\nCluster {cluster}:")
-        for idx in top_elements_matrix[cluster]:
-            document_content = features[idx]  # Assuming features are document vectors
-            print(f"Index {idx}: {document_content[:100]}")  # Print the first 100 characters
+        indices = " ".join(map(str, top_elements_matrix[cluster]))
+        print(f"Cluster {cluster}: {indices}")
 
 if __name__ == "__main__":
     main()
