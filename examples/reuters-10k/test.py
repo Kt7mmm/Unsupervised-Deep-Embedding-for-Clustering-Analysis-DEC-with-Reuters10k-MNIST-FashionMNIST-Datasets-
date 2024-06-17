@@ -1,53 +1,3 @@
-import random
-import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader
-import click
-import pickle
-from sklearn.utils import resample
-from tensorboardX import SummaryWriter
-
-from ptdec.dec import DEC
-from ptdec.model import train, predict
-from ptsdae.sdae import StackedDenoisingAutoEncoder
-import ptsdae.model as ae
-from ptdec.utils import cluster_accuracy
-
-class ReutersDataset(Dataset):
-    def __init__(self, features, labels, cuda):
-        self.features = torch.tensor(np.stack(features), dtype=torch.float32)
-        self.labels = torch.tensor(np.array(labels).squeeze(), dtype=torch.long)
-        self.cuda = cuda
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        feature = self.features[idx]
-        label = self.labels[idx]
-        if self.cuda:
-            feature = feature.cuda()
-            label = label.cuda()
-        return feature, label
-
-def balance_classes(features, labels):
-    class_counts = {category: 0 for category in range(4)}
-    class_data = {category: [] for category in range(4)}
-    for feature, label in zip(features, labels):
-        class_data[label].append(feature)
-        class_counts[label] += 1
-
-    min_count = min(class_counts.values())
-    balanced_features = []
-    balanced_labels = []
-
-    for label in range(4):
-        sampled_features = resample(class_data[label], n_samples=min_count, random_state=42)
-        balanced_features.extend(sampled_features)
-        balanced_labels.extend([label] * min_count)
-
-    return balanced_features, balanced_labels
-
 @click.command()
 @click.option(
     "--cuda", help="whether to use CUDA (default False).", type=bool, default=False
@@ -58,29 +8,34 @@ def balance_classes(features, labels):
 @click.option(
     "--pretrain-epochs",
     help="number of pretraining epochs (default 300).",
-    type=int, default=300,
+    type=int,
+    default=300,
 )
 @click.option(
     "--finetune-epochs",
     help="number of finetune epochs (default 500).",
-    type=int, default=500,
+    type=int,
+    default=500,
 )
 @click.option(
     "--testing-mode",
     help="whether to run in testing mode (default False).",
-    type=bool, default=False
+    type=bool,
+    default=False,
 )
 @click.option(
-    "--pkl-file",
-    help="path to the filtered_reuters_dataset.pkl file.",
-    type=str, default="filtered_reuters_dataset.pkl"
+    "--mat-file",
+    help="path to the reuters10k.mat file.",
+    type=str,
+    default="examples/reuters_10k/reuters10k.mat"
 )
 @click.option(
     "--target-cluster",
     help="the target cluster to get top scoring elements from (default 0).",
-    type=int, default=0
+    type=int,
+    default=0
 )
-def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, pkl_file, target_cluster):
+def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_file, target_cluster):
     writer = SummaryWriter()  # create the TensorBoard object
 
     def training_callback(epoch, lr, loss, validation_loss):
@@ -90,21 +45,18 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, pkl_f
             epoch,
         )
 
-    # Load the filtered dataset from the pickle file
-    with open(pkl_file, 'rb') as f:
-        features, labels = pickle.load(f)
-        
-    # Print out unique labels
-    print(set(labels))
+    mat_contents = sio.loadmat(mat_file)
+    features = mat_contents['X']
+    labels = mat_contents['Y'].squeeze()  # Ensure labels are 1D
 
-    # Balance the dataset
-    balanced_features, balanced_labels = balance_classes(features, labels)
-    
-    ds_train = ReutersDataset(features=balanced_features, labels=balanced_labels, cuda=cuda)  # training dataset
-    ds_val = ReutersDataset(features=balanced_features, labels=balanced_labels, cuda=cuda)  # evaluation dataset
-    
+    # Chia tập dữ liệu thành tập huấn luyện và tập kiểm tra
+    X_train, X_val, y_train, y_val = train_test_split(features, labels, test_size=0.2, random_state=42)
+
+    ds_train = ReutersDataset(features=X_train, labels=y_train, cuda=cuda)  # training dataset
+    ds_val = ReutersDataset(features=X_val, labels=y_val, cuda=cuda)  # validation dataset
+
     autoencoder = StackedDenoisingAutoEncoder(
-        [balanced_features[0].shape[0], 500, 500, 2000, 10], final_activation=None
+        [2000, 500, 500, 2000, 10], final_activation=None
     )
     if cuda:
         autoencoder.cuda()
@@ -158,7 +110,7 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, pkl_f
     torch.save(model.state_dict(), "dec_model.pth")
 
     predicted, actual = predict(
-        ds_train, model, 1024, silent=True, return_actual=True, cuda=cuda
+        ds_val, model, 1024, silent=True, return_actual=True, cuda=cuda  # Dùng tập validation để kiểm tra
     )
     actual = actual.cpu().numpy()
     predicted = predicted.cpu().numpy()
@@ -168,7 +120,7 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, pkl_f
     # Get the soft assignments
     model.eval()
     with torch.no_grad():
-        q = model(ds_train.features)
+        q = model(ds_val.features)
         if cuda:
             q = q.cpu()
         q = q.numpy()
@@ -184,7 +136,7 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, pkl_f
     if not testing_mode:
         predicted_reassigned = [
             reassignment[item] for item in predicted
-        ]
+        ]  # TODO numpify
         confusion = confusion_matrix(actual, predicted_reassigned)
         normalised_confusion = (
             confusion.astype("float") / confusion.sum(axis=1)[:, np.newaxis]
@@ -195,6 +147,7 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, pkl_f
         )
         print("Writing out confusion diagram with UUID: %s" % confusion_id)
         writer.close()
+
 
 if __name__ == "__main__":
     main()

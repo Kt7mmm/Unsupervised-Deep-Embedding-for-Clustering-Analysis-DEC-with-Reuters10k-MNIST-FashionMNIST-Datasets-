@@ -1,5 +1,6 @@
 import numpy as np
 import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 import torch
 from torch.utils.data import Dataset
@@ -45,30 +46,21 @@ def load_models(cuda):
     
     return autoencoder, model
 
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix
-import uuid
-
-def generate_confusion_matrix(actual, predicted_reassigned):
-    confusion = confusion_matrix(actual, predicted_reassigned)
+def generate_confusion_matrix(actual, predicted_reassigned, class_range):
+    confusion = confusion_matrix(actual, predicted_reassigned, labels=class_range)
     
-    # Avoid division by zero by using safe division and handling empty rows
-    with np.errstate(all='ignore'):
-        normalised_confusion = np.divide(
-            confusion, confusion.sum(axis=1, keepdims=True)
-        )
-        normalised_confusion[~np.isfinite(normalised_confusion)] = 0  # replace inf, -inf, NaN with 0
+    # Normalize confusion matrix
+    confusion_normalized = confusion.astype('float') / confusion.sum(axis=1)[:, np.newaxis]
+    confusion_normalized[np.isnan(confusion_normalized)] = 0  # replace NaN with 0
     
     # Plotting
     plt.figure(figsize=(12, 10))
-    sns.heatmap(normalised_confusion, annot=True, cmap='magma', fmt='.2f', cbar=True)
-    plt.title('Normalized Confusion Matrix')
+    sns.heatmap(confusion_normalized, annot=True, cmap='magma', fmt='.2f', cbar=True)
+    plt.title('Normalized Confusion Matrix for REUTERS-10K')
     plt.xlabel('Predicted')
     plt.ylabel('Actual')
-    plt.xticks(np.arange(10), [f'Class {i}' for i in range(10)], rotation=45)
-    plt.yticks(np.arange(10), [f'Class {i}' for i in range(10)], rotation=45)
+    plt.xticks(np.arange(len(class_range)) + 0.5, [f'Class {i}' for i in class_range], rotation=45)
+    plt.yticks(np.arange(len(class_range)) + 0.5, [f'Class {i}' for i in class_range], rotation=45)
     
     # Save the figure
     confusion_id = uuid.uuid4().hex
@@ -76,7 +68,7 @@ def generate_confusion_matrix(actual, predicted_reassigned):
     plt.show()
 
     print("Writing out confusion diagram with UUID: %s" % confusion_id)
-    
+
 @click.command()
 @click.option(
     "--cuda", 
@@ -91,12 +83,14 @@ def generate_confusion_matrix(actual, predicted_reassigned):
     default="examples/reuters_10k/reuters10k.mat"
 )
 @click.option(
-    "--target-cluster",
-    help="The target cluster to get top scoring elements from (default 0).",
-    type=int,
-    default=0
+    "--class-range",
+    help="Range of classes to include in the confusion matrix.",
+    type=str,
+    default="0,1,2,3"
 )
-def main(cuda, mat_file, target_cluster):
+def main(cuda, mat_file, class_range):
+    class_range = list(map(int, class_range.split(',')))
+    
     mat_contents = sio.loadmat(mat_file)
     features = mat_contents['X']
     labels = mat_contents['Y']
@@ -114,35 +108,11 @@ def main(cuda, mat_file, target_cluster):
     reassignment, accuracy = cluster_accuracy(actual, predicted)
     print("Final DEC accuracy: %s" % accuracy)
 
-    # Get the soft assignments
-    model.eval()
-    with torch.no_grad():
-        q = model(torch.tensor(ds_train.features, dtype=torch.float).cuda() if cuda else torch.tensor(ds_train.features, dtype=torch.float))
-        if cuda:
-            q = q.cpu()
-        q = q.numpy()
-
-    # Iterate over each cluster
-    # Initialize an empty matrix to store the top elements
-    top_elements_matrix = np.zeros((10, 10), dtype=int)
-
-    # Iterate over each cluster
-    for cluster in range(10):
-        # Get top 10 scoring elements from the current cluster
-        top_indices = np.argsort(q[:, cluster])[-10:]
-        
-        # Store the top indices in the matrix
-        top_elements_matrix[cluster] = top_indices
-
-    # Print the matrix
-    print("Top 10 scoring elements in each cluster:")
-    print(top_elements_matrix)
-
     # Generate the confusion matrix plot
     predicted_reassigned = [
         reassignment[item] for item in predicted
-    ]  # TODO numpify
-    generate_confusion_matrix(actual, predicted_reassigned)
+    ]
+    generate_confusion_matrix(actual, predicted_reassigned, class_range)
 
 if __name__ == "__main__":
     main()

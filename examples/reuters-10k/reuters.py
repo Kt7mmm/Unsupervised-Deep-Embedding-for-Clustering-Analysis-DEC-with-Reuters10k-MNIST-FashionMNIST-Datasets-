@@ -1,23 +1,16 @@
-import click
 import numpy as np
 import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
-from torch.optim import SGD
-from torch.optim.lr_scheduler import StepLR
+import uuid
+import click
 import torch
 from torch.utils.data import Dataset
-from tensorboardX import SummaryWriter
-import uuid
-import os
 import scipy.io as sio
-
 from ptdec.dec import DEC
-from ptdec.model import train, predict, target_distribution
+from ptdec.model import predict
 from ptsdae.sdae import StackedDenoisingAutoEncoder
-import ptsdae.model as ae
 from ptdec.utils import cluster_accuracy
-from sklearn.model_selection import train_test_split
-
 
 class ReutersDataset(Dataset):
     def __init__(self, features, labels, cuda):
@@ -31,127 +24,93 @@ class ReutersDataset(Dataset):
     def __getitem__(self, idx):
         feature = self.features[idx]
         label = self.labels[idx]
-        feature = torch.tensor(feature, dtype=torch.float)
+        feature = torch.tensor(feature, dtype=torch.float)  # Convert to PyTorch tensor
         label = torch.tensor(label, dtype=torch.long)
         if self.cuda:
             feature = feature.cuda()
             label = label.cuda()
         return feature, label
 
+def load_models(cuda):
+    autoencoder = StackedDenoisingAutoEncoder(
+        [2000, 500, 500, 2000, 10], final_activation=None
+    )
+    autoencoder.load_state_dict(torch.load("finetuned_model.pth"))
+    if cuda:
+        autoencoder.cuda()
+
+    model = DEC(cluster_number=10, hidden_dimension=10, encoder=autoencoder.encoder)
+    model.load_state_dict(torch.load("dec_model.pth"))
+    if cuda:
+        model.cuda()
+    
+    return autoencoder, model
+
+def generate_confusion_matrix(actual, predicted_reassigned, class_range):
+    confusion = confusion_matrix(actual, predicted_reassigned, labels=class_range)
+    
+    # Avoid division by zero by using safe division and handling empty rows
+    with np.errstate(all='ignore'):
+        normalised_confusion = np.divide(
+            confusion, confusion.sum(axis=1, keepdims=True)
+        )
+        normalised_confusion[~np.isfinite(normalised_confusion)] = 0  # replace inf, -inf, NaN with 0
+    
+    # Plotting
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(normalised_confusion, annot=confusion, cmap='magma', fmt='.2f', cbar=True)
+    plt.title('Normalized Confusion Matrix')
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.xticks(np.arange(len(class_range)) + 0.5, [f'Class {i}' for i in class_range], rotation=45)
+    plt.yticks(np.arange(len(class_range)) + 0.5, [f'Class {i}' for i in class_range], rotation=45)
+    
+    # Save the figure
+    confusion_id = uuid.uuid4().hex
+    plt.savefig("confusion_%s.png" % confusion_id)
+    plt.show()
+
+    print("Writing out confusion diagram with UUID: %s" % confusion_id)
 
 @click.command()
 @click.option(
-    "--cuda", help="whether to use CUDA (default False).", type=bool, default=False
-)
-@click.option(
-    "--batch-size", help="training batch size (default 256).", type=int, default=256
-)
-@click.option(
-    "--pretrain-epochs",
-    help="number of pretraining epochs (default 300).",
-    type=int,
-    default=300,
-)
-@click.option(
-    "--finetune-epochs",
-    help="number of finetune epochs (default 500).",
-    type=int,
-    default=500,
-)
-@click.option(
-    "--testing-mode",
-    help="whether to run in testing mode (default False).",
-    type=bool,
-    default=False,
+    "--cuda", 
+    help="Whether to use CUDA for GPU acceleration.",
+    type=bool, 
+    default=False
 )
 @click.option(
     "--mat-file",
-    help="path to the reuters10k.mat file.",
+    help="Path to the reuters10k.mat file.",
     type=str,
     default="examples/reuters_10k/reuters10k.mat"
 )
 @click.option(
     "--target-cluster",
-    help="the target cluster to get top scoring elements from (default 0).",
+    help="The target cluster to get top scoring elements from (default 0).",
     type=int,
     default=0
 )
-def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_file, target_cluster):
-    writer = SummaryWriter()  # create the TensorBoard object
-
-    def training_callback(epoch, lr, loss, validation_loss):
-        writer.add_scalars(
-            "data/autoencoder",
-            {"lr": lr, "loss": loss, "validation_loss": validation_loss,},
-            epoch,
-        )
-
+@click.option(
+    "--class-range",
+    help="Range of classes to include in the confusion matrix.",
+    type=str,
+    default="0,1,2,3"
+)
+def main(cuda, mat_file, target_cluster, class_range):
+    class_range = list(map(int, class_range.split(',')))
+    
     mat_contents = sio.loadmat(mat_file)
     features = mat_contents['X']
     labels = mat_contents['Y']
 
-    # Chia tập dữ liệu thành tập huấn luyện và tập kiểm tra
-    X_train, X_val, y_train, y_val = train_test_split(features, labels, test_size=0.2, random_state=42)
+    ds_train = ReutersDataset(features=features, labels=labels, cuda=cuda)  # training dataset
 
-    ds_train = ReutersDataset(features=X_train, labels=y_train, cuda=cuda)  # training dataset
-    ds_val = ReutersDataset(features=X_val, labels=y_val, cuda=cuda)  # validation dataset
+    autoencoder, model = load_models(cuda)
 
-    autoencoder = StackedDenoisingAutoEncoder(
-        [2000, 500, 500, 2000, 10], final_activation=None
-    )
-    if cuda:
-        autoencoder.cuda()
-    print("Pretraining stage.")
-    ae.pretrain(
-        ds_train,
-        autoencoder,
-        cuda=cuda,
-        validation=ds_val,
-        epochs=pretrain_epochs,
-        batch_size=batch_size,
-        optimizer=lambda model: SGD(model.parameters(), lr=0.1, momentum=0.9),
-        scheduler=lambda x: StepLR(x, 100, gamma=0.1),
-        corruption=0.2,
-    )
-    # Save the pretrained model
-    torch.save(autoencoder.state_dict(), "pretrained_model.pth")
-
-    print("Training stage.")
-    ae_optimizer = SGD(params=autoencoder.parameters(), lr=0.1, momentum=0.9)
-    ae.train(
-        ds_train,
-        autoencoder,
-        cuda=cuda,
-        validation=ds_val,
-        epochs=finetune_epochs,
-        batch_size=batch_size,
-        optimizer=ae_optimizer,
-        scheduler=StepLR(ae_optimizer, 100, gamma=0.1),
-        corruption=0.2,
-        update_callback=training_callback,
-    )
-    # Save the fine-tuned model
-    torch.save(autoencoder.state_dict(), "finetuned_model.pth")
-
-    print("DEC stage.")
-    model = DEC(cluster_number=10, hidden_dimension=10, encoder=autoencoder.encoder)
-    if cuda:
-        model.cuda()
-    dec_optimizer = SGD(model.parameters(), lr=0.01, momentum=0.9)
-    train(
-        dataset=ds_train,
-        model=model,
-        epochs=100,
-        batch_size=256,
-        optimizer=dec_optimizer,
-        stopping_delta=0.000001,
-        cuda=cuda,
-    )
-    # Save the DEC model
-    torch.save(model.state_dict(), "dec_model.pth")
-
+    # Generate predictions
     predicted, actual = predict(
-        ds_val, model, 1024, silent=True, return_actual=True, cuda=cuda  # Dùng tập validation để kiểm tra
+        ds_train, model, 1024, silent=True, return_actual=True, cuda=cuda
     )
     actual = actual.cpu().numpy()
     predicted = predicted.cpu().numpy()
@@ -161,34 +120,32 @@ def main(cuda, batch_size, pretrain_epochs, finetune_epochs, testing_mode, mat_f
     # Get the soft assignments
     model.eval()
     with torch.no_grad():
-        q = model(ds_val.features)
+        q = model(torch.tensor(ds_train.features, dtype=torch.float).cuda() if cuda else torch.tensor(ds_train.features, dtype=torch.float))
         if cuda:
             q = q.cpu()
         q = q.numpy()
 
-    # Get top 10 scoring elements from the target cluster
-    top_indices = np.argsort(q[:, target_cluster])[-10:]
-    top_scores = q[top_indices, target_cluster]
+    # Iterate over each cluster
+    # Initialize an empty matrix to store the top elements
+    top_elements_matrix = np.zeros((10, 10), dtype=int)
 
-    print(f"Top 10 scoring elements in cluster {target_cluster}:")
-    for idx, score in zip(top_indices, top_scores):
-        print(f"Index: {idx}, Score: {score}")
+    # Iterate over each cluster
+    for cluster in range(10):
+        # Get top 10 scoring elements from the current cluster
+        top_indices = np.argsort(q[:, cluster])[-10:]
+        
+        # Store the top indices in the matrix
+        top_elements_matrix[cluster] = top_indices
 
-    if not testing_mode:
-        predicted_reassigned = [
-            reassignment[item] for item in predicted
-        ]  # TODO numpify
-        confusion = confusion_matrix(actual, predicted_reassigned)
-        normalised_confusion = (
-            confusion.astype("float") / confusion.sum(axis=1)[:, np.newaxis]
-        )
-        confusion_id = uuid.uuid4().hex
-        sns.heatmap(normalised_confusion).get_figure().savefig(
-            "confusion_%s.png" % confusion_id
-        )
-        print("Writing out confusion diagram with UUID: %s" % confusion_id)
-        writer.close()
+    # Print the matrix
+    print("Top 10 scoring elements in each cluster:")
+    print(top_elements_matrix)
 
+    # Generate the confusion matrix plot
+    predicted_reassigned = [
+        reassignment[item] for item in predicted
+    ]  # TODO numpify
+    generate_confusion_matrix(actual, predicted_reassigned, class_range)
 
 if __name__ == "__main__":
     main()
